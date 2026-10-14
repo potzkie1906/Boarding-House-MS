@@ -1,5 +1,6 @@
-// TEMPORARY Phase 1 page: confirms that Next.js, Tailwind CSS, and the PostgreSQL
-// connection all work. In Phase 3 this page will redirect to the login screen instead.
+// TEMPORARY setup-check page: confirms that Next.js, Tailwind CSS, the PostgreSQL
+// connection (Phase 1), and the tables + seed data (Phase 2) all work.
+// In Phase 3 this page will redirect to the login screen instead.
 import { prisma } from "@/lib/prisma";
 
 // Run this page on every request instead of pre-building it once,
@@ -22,13 +23,37 @@ async function checkDatabase() {
   }
 }
 
+// Phase 2 check: can we read the tables created by the migration and filled by the seed?
+async function checkSeedData() {
+  try {
+    const [admins, rooms, beds, tenants] = await Promise.all([
+      prisma.user.count({ where: { role: "ADMIN" } }),
+      prisma.room.count(),
+      prisma.bed.count(),
+      prisma.tenant.count(),
+    ]);
+    if (rooms === 0) {
+      return { ok: false, message: "The tables exist but are empty. Run: npm run db:seed" };
+    }
+    return { ok: true, admins, rooms, beds, tenants };
+  } catch (error) {
+    // P2021 is Prisma's code for "table does not exist": the migration hasn't been applied.
+    if (error.code === "P2021") {
+      return { ok: false, message: "The tables don't exist yet. Run: npm run db:migrate" };
+    }
+    return { ok: false, message: error.message.trim() };
+  }
+}
+
 export default async function Home() {
   const db = await checkDatabase();
+  // Only look at the tables if we could connect at all.
+  const seed = db.ok ? await checkSeedData() : null;
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-16">
       <h1 className="text-3xl font-bold">Boarding House Management System</h1>
-      <p className="mt-2 text-gray-600">Phase 1 setup check</p>
+      <p className="mt-2 text-gray-600">Setup check (temporary page)</p>
 
       <ul className="mt-8 space-y-3">
         <li className="rounded-lg border border-green-200 bg-green-50 p-4">
@@ -53,6 +78,20 @@ export default async function Home() {
             </p>
           </li>
         )}
+        {seed &&
+          (seed.ok ? (
+            <li className="rounded-lg border border-green-200 bg-green-50 p-4">
+              ✅ <strong>Tables and seed data</strong> are readable
+              <p className="mt-1 text-sm text-gray-600">
+                {seed.admins} admin, {seed.rooms} rooms, {seed.beds} beds, {seed.tenants} tenants
+              </p>
+            </li>
+          ) : (
+            <li className="rounded-lg border border-red-200 bg-red-50 p-4">
+              ❌ <strong>Tables and seed data</strong>
+              <p className="mt-2 text-sm text-red-700">{seed.message}</p>
+            </li>
+          ))}
       </ul>
     </main>
   );

@@ -1,8 +1,16 @@
-// Prisma schema: describes our database tables ("models") and how to connect.
+// Prisma schema: describes our database tables ("models") and how they relate.
 // Docs: https://pris.ly/d/prisma-schema
 //
-// Phase 1 only sets up the connection. The real models (User, Room, Bed,
-// Tenant, Bill, ...) are added in Phase 2.
+// After changing this file, run:  npm run db:migrate
+// That creates a new SQL migration in prisma/migrations and applies it.
+//
+// Conventions used below:
+// - IDs are random strings (cuid), so URLs like /tenants/3 can't be guessed by counting.
+//   (Guessing is not the real protection, though; every page still checks permissions.)
+// - Money uses Decimal(10, 2): exact pesos and centavos, no floating-point rounding errors.
+// - Calendar dates (due dates, move-in dates, payment dates) use @db.Date, which stores
+//   only the day with no time and no time zone, so "Oct 5" never shifts to "Oct 4".
+// - createdAt/updatedAt timestamps are stored in UTC; the app shows them in Manila time.
 
 generator client {
   // "prisma-client-js" generates plain JavaScript into node_modules/@prisma/client,
@@ -14,4 +22,235 @@ datasource db {
   provider = "postgresql"
   // The connection URL is NOT written here. In Prisma 7 it lives in
   // prisma.config.mjs, which reads DATABASE_URL from the .env file.
+}
+
+// ─────────────────────────────────────────────────────────────
+// Enums: fixed lists of allowed values
+// ─────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  TENANT
+}
+
+enum TenantStatus {
+  ACTIVE
+  MOVED_OUT
+}
+
+// Electricity and water are separate types (not one "UTILITY" type) so the database
+// can guarantee at most one rent, one electricity, and one water bill per tenant per month.
+enum BillType {
+  RENT
+  ELECTRICITY
+  WATER
+}
+
+enum UtilityType {
+  ELECTRICITY
+  WATER
+}
+
+enum PaymentMethod {
+  CASH
+  GCASH
+  BANK
+}
+
+enum MaintenanceStatus {
+  PENDING
+  IN_PROGRESS
+  RESOLVED
+}
+
+// ─────────────────────────────────────────────────────────────
+// Accounts
+// ─────────────────────────────────────────────────────────────
+
+// A login account. Both the admin and every tenant have one.
+model User {
+  id           String   @id @default(cuid())
+  name         String // full name, shown in the app and on receipts
+  email        String   @unique // always saved in lowercase by the app
+  passwordHash String // bcrypt hash; the real password is never stored
+  role         Role     @default(TENANT)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant Tenant? // filled in only when role is TENANT
+}
+
+// ─────────────────────────────────────────────────────────────
+// Rooms and beds
+// ─────────────────────────────────────────────────────────────
+
+model Room {
+  id          String   @id @default(cuid())
+  name        String   @unique // e.g. "Room 101"
+  floor       Int
+  monthlyRate Decimal  @db.Decimal(10, 2) // rent per bed per month, in pesos
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // A room's capacity is simply how many beds it has, so we don't store it twice.
+  beds                Bed[]
+  bills               Bill[]
+  utilityCharges      UtilityCharge[]
+  maintenanceRequests MaintenanceRequest[]
+}
+
+// One bed slot inside a room. A bed is "occupied" when a tenant is assigned to it.
+model Bed {
+  id        String   @id @default(cuid())
+  roomId    String
+  label     String // e.g. "Bed 1"
+  createdAt DateTime @default(now())
+
+  // Deleting a room deletes its beds, but the database refuses if a tenant is still in one.
+  room   Room    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  tenant Tenant?
+
+  @@unique([roomId, label]) // no two beds in the same room share a label
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tenants
+// ─────────────────────────────────────────────────────────────
+
+// Profile details for a tenant. Their name and email are on their User account.
+model Tenant {
+  id                     String       @id @default(cuid())
+  userId                 String       @unique
+  contactNumber          String
+  schoolOrWorkplace      String?
+  emergencyContactName   String
+  emergencyContactNumber String
+  moveInDate             DateTime     @db.Date
+  moveOutDate            DateTime?    @db.Date
+  status                 TenantStatus @default(ACTIVE)
+  // The bed this tenant sleeps in. @unique means one tenant per bed.
+  // Moving out sets this back to null, which frees the bed.
+  bedId                  String?      @unique
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bed                 Bed?                 @relation(fields: [bedId], references: [id], onDelete: Restrict)
+  bills               Bill[]
+  maintenanceRequests MaintenanceRequest[]
+
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Billing
+// ─────────────────────────────────────────────────────────────
+
+// One charge a tenant owes: a month's rent, or their share of a room's electricity/water.
+//
+// There is no "status" column on purpose. Unpaid / Partial / Paid / Overdue is calculated
+// from the payments and the due date whenever we show it, so it can never be out of date
+// (a bill becomes Overdue just because time passes, without anyone editing it).
+model Bill {
+  id              String   @id @default(cuid())
+  tenantId        String
+  // The room this charge is for. Saved on the bill so receipts still show the right
+  // room after the tenant moves out or transfers.
+  roomId          String
+  type            BillType
+  period          String // the month covered, as "YYYY-MM", e.g. "2026-10"
+  amount          Decimal  @db.Decimal(10, 2)
+  dueDate         DateTime @db.Date
+  // Set only for ELECTRICITY/WATER bills: the room charge this share was split from.
+  utilityChargeId String?
+  createdAt       DateTime @default(now())
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  room          Room           @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  // Deleting a utility charge also deletes the shares split from it,
+  // but the database refuses if any of those shares already has a payment.
+  utilityCharge UtilityCharge? @relation(fields: [utilityChargeId], references: [id], onDelete: Cascade)
+  payments      Payment[]
+
+  // Prevents duplicates, e.g. two October rent bills for the same tenant.
+  @@unique([tenantId, type, period])
+  @@index([period])
+  @@index([dueDate])
+}
+
+// Money received for one bill. A bill can have several payments (partial payments).
+model Payment {
+  id          String        @id @default(cuid())
+  // A human-friendly, ever-increasing number printed on the PDF receipt (1, 2, 3, ...).
+  receiptNo   Int           @unique @default(autoincrement())
+  billId      String
+  amount      Decimal       @db.Decimal(10, 2)
+  paymentDate DateTime      @db.Date
+  method      PaymentMethod
+  referenceNo String? // GCash or bank reference number; usually empty for cash
+  createdAt   DateTime      @default(now())
+
+  // A bill that already has payments cannot be deleted.
+  bill Bill @relation(fields: [billId], references: [id], onDelete: Restrict)
+
+  @@index([billId])
+  @@index([paymentDate])
+}
+
+// A room's total electricity or water bill for one month, entered by the admin.
+// The app splits `amount` equally into ELECTRICITY/WATER Bills for the room's active tenants.
+model UtilityCharge {
+  id              String      @id @default(cuid())
+  roomId          String
+  type            UtilityType
+  period          String // "YYYY-MM"
+  amount          Decimal     @db.Decimal(10, 2) // total for the whole room
+  // Optional meter details, used when the admin enters readings instead of a total:
+  // amount = (currentReading - previousReading) * ratePerUnit
+  previousReading Decimal?    @db.Decimal(10, 2)
+  currentReading  Decimal?    @db.Decimal(10, 2)
+  ratePerUnit     Decimal?    @db.Decimal(10, 4)
+  createdAt       DateTime    @default(now())
+
+  room  Room   @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  bills Bill[]
+
+  // One electricity charge and one water charge per room per month.
+  @@unique([roomId, type, period])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Maintenance and announcements
+// ─────────────────────────────────────────────────────────────
+
+model MaintenanceRequest {
+  id          String            @id @default(cuid())
+  tenantId    String
+  // Filled in automatically from the tenant's bed when they submit the request.
+  // Optional because a tenant might not have a bed assigned yet.
+  roomId      String?
+  title       String
+  description String
+  status      MaintenanceStatus @default(PENDING)
+  adminNote   String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  room   Room?  @relation(fields: [roomId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([status])
+}
+
+model Announcement {
+  id        String   @id @default(cuid())
+  title     String
+  body      String
+  isPinned  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isPinned, createdAt])
 }
