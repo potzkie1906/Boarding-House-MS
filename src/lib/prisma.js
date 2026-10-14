@@ -6,7 +6,14 @@ import { PrismaPg } from "@prisma/adapter-pg";
 function createPrismaClient() {
   // Prisma 7 talks to PostgreSQL through a "driver adapter" built on the `pg` library.
   const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-  return new PrismaClient({ adapter });
+  return new PrismaClient({
+    adapter,
+    // Never load password hashes unless a query asks for them on purpose. Otherwise
+    // something like `include: { user: true }` would carry the hash along with the
+    // tenant's name and could end up sent to the browser.
+    // Only the login check opts back in, with: omit: { passwordHash: false }
+    omit: { user: { passwordHash: true } },
+  });
 }
 
 // In development, Next.js re-runs our files every time we save. Without this trick,

@@ -2,19 +2,30 @@
 // Docs: https://pris.ly/d/prisma-schema
 //
 // After changing this file, run:  npm run db:migrate
-// That creates a new SQL migration in prisma/migrations and applies it.
+// - It asks you to name the change (e.g. add_meter_reading). Type the name at that prompt;
+//   don't add --name after "npm run", because it would be passed to the wrong command.
+// - It writes a new SQL migration in prisma/migrations, applies it to the database,
+//   and regenerates the Prisma Client.
+// - If `npm run dev` is running, stop it (Ctrl + C) and start it again afterwards,
+//   otherwise the app keeps using the old client.
 //
 // Conventions used below:
-// - IDs are random strings (cuid), so URLs like /tenants/3 can't be guessed by counting.
+// - IDs are hard-to-guess strings (cuid), so URLs like /tenants/3 can't be guessed by counting.
 //   (Guessing is not the real protection, though; every page still checks permissions.)
 // - Money uses Decimal(10, 2): exact pesos and centavos, no floating-point rounding errors.
-// - Calendar dates (due dates, move-in dates, payment dates) use @db.Date, which stores
-//   only the day with no time and no time zone, so "Oct 5" never shifts to "Oct 4".
+//   Prisma returns these as Decimal objects, not plain JS numbers.
+// - Calendar dates (due dates, move-in dates, payment dates) use @db.Date, which keeps only
+//   the day. Prisma takes that day from the UTC date of the JS Date you give it, so build
+//   these from a "YYYY-MM-DD" string, e.g. new Date("2026-10-05"). Avoid new Date(2026, 9, 5)
+//   and a bare new Date(): in Manila (UTC+8) those can be saved as the previous day.
 // - createdAt/updatedAt timestamps are stored in UTC; the app shows them in Manila time.
+// - @@unique blocks duplicates. @@index only makes searches faster; it never blocks or changes data.
 
 generator client {
-  // "prisma-client-js" generates plain JavaScript into node_modules/@prisma/client,
-  // so we can `import { PrismaClient } from "@prisma/client"` without TypeScript.
+  // "prisma-client-js" is Prisma's older generator, still fully supported in v7. It writes
+  // plain JavaScript into node_modules/.prisma/client, which we import with
+  // `import { PrismaClient } from "@prisma/client"`. (Newer Prisma docs show "prisma-client",
+  // which generates TypeScript files instead.)
   provider = "prisma-client-js"
 }
 
@@ -156,7 +167,8 @@ model Bill {
   id              String   @id @default(cuid())
   tenantId        String
   // The room this charge is for. Saved on the bill so receipts still show the right
-  // room after the tenant moves out or transfers.
+  // room after the tenant moves out or transfers. For display only: roommates share it,
+  // so permission checks always use tenantId, never roomId.
   roomId          String
   type            BillType
   period          String // the month covered, as "YYYY-MM", e.g. "2026-10"
@@ -183,6 +195,7 @@ model Bill {
 model Payment {
   id          String        @id @default(cuid())
   // A human-friendly, ever-increasing number printed on the PDF receipt (1, 2, 3, ...).
+  // Gaps are normal. Links to a receipt use the payment's id, not this guessable number.
   receiptNo   Int           @unique @default(autoincrement())
   billId      String
   amount      Decimal       @db.Decimal(10, 2)

@@ -1,9 +1,9 @@
 // Seed script: fills the database with starter data so you can log in and test.
-// Run it with:  npm run db:seed
+// Run it with:  npm run db:seed   (or npm run db:reset to wipe everything and start over)
 //
-// It is safe to run more than once. It uses "upsert" (update-or-insert): if a record with
-// the same email / room name / bed label already exists, it is left alone instead of
-// being duplicated.
+// It is safe to run more than once: it only creates records that don't exist yet.
+// If an account with the same email, a room with the same name, or a bed with the same
+// label already exists, it is left alone instead of being duplicated or overwritten.
 import "dotenv/config";
 import bcrypt from "bcryptjs";
 import { PrismaClient } from "@prisma/client";
@@ -14,6 +14,7 @@ const prisma = new PrismaClient({
 });
 
 // Development-only passwords. You can override them in .env (see .env.example).
+// They are only used when an account is first created; re-seeding never changes a password.
 const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD || "admin12345";
 const TENANT_PASSWORD = process.env.SEED_TENANT_PASSWORD || "tenant12345";
 
@@ -52,18 +53,29 @@ const TENANTS = [
   },
 ];
 
+// Collected while seeding, printed at the end.
+const loginLines = [];
+
+async function userExists(email) {
+  return (await prisma.user.findUnique({ where: { email } })) !== null;
+}
+
 async function main() {
   // 1. The admin account
-  await prisma.user.upsert({
-    where: { email: "admin@example.com" },
-    update: {},
-    create: {
-      name: "Boarding House Admin",
-      email: "admin@example.com",
-      passwordHash: await bcrypt.hash(ADMIN_PASSWORD, BCRYPT_COST),
-      role: "ADMIN",
-    },
-  });
+  const adminEmail = "admin@example.com";
+  if (await userExists(adminEmail)) {
+    loginLines.push(`Admin:   ${adminEmail} (already existed; password unchanged)`);
+  } else {
+    await prisma.user.create({
+      data: {
+        name: "Boarding House Admin",
+        email: adminEmail,
+        passwordHash: await bcrypt.hash(ADMIN_PASSWORD, BCRYPT_COST),
+        role: "ADMIN",
+      },
+    });
+    loginLines.push(`Admin:   ${adminEmail} / ${ADMIN_PASSWORD}`);
+  }
 
   // 2. Rooms, each with its bed slots ("Bed 1", "Bed 2", ...)
   for (const { bedCount, ...roomData } of ROOMS) {
@@ -86,15 +98,18 @@ async function main() {
 
   // 3. Tenants: a User login account plus a Tenant profile, assigned to a bed
   for (const t of TENANTS) {
+    if (await userExists(t.email)) {
+      loginLines.push(`Tenant:  ${t.email} (already existed; password unchanged)`);
+      continue;
+    }
+
     const bed = await prisma.bed.findFirst({
       where: { label: t.bedLabel, room: { name: t.roomName } },
       include: { tenant: true },
     });
 
-    await prisma.user.upsert({
-      where: { email: t.email },
-      update: {},
-      create: {
+    await prisma.user.create({
+      data: {
         name: t.name,
         email: t.email,
         passwordHash: await bcrypt.hash(TENANT_PASSWORD, BCRYPT_COST),
@@ -115,6 +130,7 @@ async function main() {
         },
       },
     });
+    loginLines.push(`Tenant:  ${t.email} / ${TENANT_PASSWORD}`);
   }
 
   const [users, rooms, beds, tenants] = await Promise.all([
@@ -128,9 +144,8 @@ async function main() {
   console.log(`   ${users} users, ${rooms} rooms, ${beds} beds, ${tenants} tenants in the database.`);
   console.log("");
   console.log("   Sample logins (development only):");
-  console.log(`   Admin:   admin@example.com / ${ADMIN_PASSWORD}`);
-  for (const t of TENANTS) {
-    console.log(`   Tenant:  ${t.email} / ${TENANT_PASSWORD}`);
+  for (const line of loginLines) {
+    console.log(`   ${line}`);
   }
 }
 
